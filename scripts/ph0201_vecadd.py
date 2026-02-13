@@ -191,6 +191,87 @@ def benchmark(size, provider):
 benchmark.run(print_data=True, show_plots=True)
 
 # %%
+# Block Size Experiments
+# %%
+# Triple sum
+import torch
+import triton
+import triton.language as tl
+
+@triton.jit
+def add_kernel(
+    x_ptr,
+    y_ptr,
+    w_ptr,
+    output_ptr,
+    n_elements,
+    BLOCK_SIZE: tl.constexpr,
+):
+    pid=tl.program_id(axis=0)
+    block_start=BLOCK_SIZE*pid
+    offsets=block_start+tl.arange(0, BLOCK_SIZE)
+    mask=offsets<n_elements
+
+    x=tl.load(x_ptr+offsets, mask=mask)
+    y=tl.load(y_ptr+offsets, mask=mask)
+    w=tl.load(w_ptr+offsets, mask=mask)
 
 
+    output=x+y+w
 
+    tl.store(output_ptr+offsets, output, mask=mask)
+
+def add(x: torch.Tensor, y: torch.Tensor, w: torch.Tensor) -> torch.Tensor:
+    assert x.is_cuda and y.is_cuda and w.is_cuda, "Inputs must be on GPU"
+    assert x.shape==y.shape==w.shape, "Inputs must have the same shape"
+
+    output=torch.empty_like(x)
+    n_elements=output.numel()
+
+    grid = lambda meta: (triton.cdiv(n_elements, meta['BLOCK_SIZE']),)
+    add_kernel[grid](x,y,w, output, n_elements, BLOCK_SIZE=8192)
+    return output
+
+# --verify correctness --#
+size=2**20
+x=torch.rand(size, device="cuda")
+y=torch.rand(size, device="cuda")
+w=torch.rand(size, device="cuda")
+
+
+triton_output=add(x,y,w)
+torch_output=x+y+w
+assert torch.allclose(triton_output, torch_output), "Results don't match!"
+print("Correctness verified")
+
+# Benchmarking (Triton vs pytorch)
+@triton.testing.perf_report(
+    triton.testing.Benchmark(
+        x_names=['size'], #Parameter to vary,
+        x_vals=[2**i for i in range(12, 28)], #4k to 128m elements
+        line_arg="provider", # argument that selects the implementation
+        line_vals=['triton', 'torch'],# Implementations to compare
+        line_names=["Triton", "Pytorch"], # Legend Labels
+        styles=[("blue", "-"), ("red", "-")], # Line styles
+        ylabel='GB/s', #Y-axis label
+        plot_name="vector-addition-performance", #Output file name
+        args={}, # extra arguments (none here)
+
+    )
+)
+def benchmark(size, provider):
+    x = torch.rand(size, device='cuda', dtype=torch.float32)
+    y = torch.rand(size, device='cuda', dtype=torch.float32)
+    w = torch.rand(size, device="cuda", dtype=torch.float32)
+    quantiles = [0.5, 0.2, 0.8]
+    if provider == 'torch':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: x + y + w, quantiles=quantiles)
+    if provider == 'triton':
+        ms, min_ms, max_ms = triton.testing.do_bench(lambda: add(x, y, w), quantiles=quantiles)
+    # Calculate throughput in GB/s
+    gbps = lambda ms: 3 * x.numel() * x.element_size() / ms * 1e-6
+    return gbps(ms), gbps(max_ms), gbps(min_ms)
+
+
+benchmark.run(print_data=True, show_plots=True)
+# %%
