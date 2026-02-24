@@ -1,12 +1,18 @@
 # %%
+import os
+
+# Enable interpreter mode if no CUDA GPU is available
+if not os.environ.get("TRITON_INTERPRET") and not __import__("torch").cuda.is_available():
+    os.environ["TRITON_INTERPRET"] = "1"
 
 import torch
 import triton
 import triton.language as tl
 
-# Verify GPU is available
-assert torch.cuda.is_available(), "No GPU found — switch to a T4 runtime in Colab"
-print(f"GPU: {torch.cuda.get_device_name(0)}")
+if torch.cuda.is_available():
+    print(f"GPU: {torch.cuda.get_device_name(0)}")
+else:
+    print("No GPU found — running in Triton interpreter mode")
 print(f"Triton version: {triton.__version__}")
 # %%
 import torch
@@ -35,7 +41,7 @@ def softmax_kernel(
     mask=col_offsets<n_cols
 
     # Load the entire row 
-    row=tl.load(row_start_ptr+ col_offsets, mask=mask, other=float("inf"))
+    row=tl.load(row_start_ptr+ col_offsets, mask=mask, other=-float("inf"))
 
     # Step 1: Find the max value in the row (for numerical stability)
     row_max=tl.max(row, axis=0)
@@ -47,14 +53,14 @@ def softmax_kernel(
     numerator=tl.exp(safe_row)
 
     # step 4: Sum the exponential
-    denominator=tl.sum(numerator, axis-0)
+    denominator=tl.sum(numerator, axis=0)
 
     # Normalize:
     softmax_output=numerator/denominator
 
     # Store the result
     output_start_ptr=output_ptr+row_idx*output_row_stride
-    tl.store(output_start_ptr_col_offsets, softmax_output, mask=mask)
+    tl.store(output_start_ptr + col_offsets, softmax_output, mask=mask)
 
 print("ciao")
 # %%
